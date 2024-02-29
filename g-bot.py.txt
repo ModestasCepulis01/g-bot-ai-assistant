@@ -1,0 +1,190 @@
+import os
+import speech_recognition as sr
+import sounddevice as sd
+import soundfile as sf
+import pygame
+import random
+from openai import OpenAI
+from fuzzywuzzy import fuzz
+import face_recognition
+import cv2
+import subprocess
+
+client = OpenAI()
+main_voice = "alloy"
+
+def capture_image_no_preview(image_path):
+
+    cmd = ['libcamera-still', '-o', image_path, '-n']
+    subprocess.run(cmd)
+    faceCaptured = client.audio.speech.create(
+        model="tts-1",
+        voice=main_voice,
+        input="I took a picture of you, you look familiar, let me take a look further..."
+    )
+
+    faceCaptured.stream_to_file("Face_Captured.mp3")
+    play_audio("Face_Captured.mp3")    
+
+def recognize_faces_in_image(image_path, known_faces_dir):
+
+    unknown_image = face_recognition.load_image_file(image_path)
+
+    unknown_face_encodings = face_recognition.face_encodings(unknown_image)
+
+    names = []
+    for unknown_face_encoding in unknown_face_encodings:
+        results = []
+        for filename in os.listdir(known_faces_dir):
+            known_image = face_recognition.load_image_file(f"{known_faces_dir}/{filename}")
+            known_face_encoding = face_recognition.face_encodings(known_image)[0]
+
+            match = face_recognition.compare_faces([known_face_encoding], unknown_face_encoding)
+            results.append(match[0])
+
+            if match[0]:
+                names.append(os.path.splitext(filename)[0])
+                break
+            
+
+    nameVoice = ""
+
+    if names:
+        nameVoice = (f"Yes I know you, your name is: {', '.join(names)}, good to see you again.")
+    else:
+        nameVoice = "Sorry, I did not recognize anyone from the camera"
+        
+    nameResponse = client.audio.speech.create(
+        model="tts-1",
+        voice=main_voice,
+        input=nameVoice
+    )
+
+    nameResponse.stream_to_file("Name_Response.mp3")
+    play_audio("Name_Response.mp3")
+
+def record_audio(duration, filename, fs=44100):
+    """
+    Records audio from the microphone and save it to a file.
+    """
+    print(f"Recording for {duration} seconds...")
+    recording = sd.rec(int(duration * fs), samplerate=fs, channels=2, dtype='float64')
+    sd.wait()
+    sf.write(filename, recording, fs)
+    print(f"Recording saved to {filename}")
+
+def play_audio(file_path):
+    pygame.mixer.init()
+    pygame.mixer.music.load(file_path)
+    pygame.mixer.music.play()
+    while pygame.mixer.music.get_busy():
+        pygame.time.Clock().tick(10)
+
+def get_a_random_welcome_message():
+    welcome_list = [
+        "Hey! My name is G-Bot, how can I help?",
+        "Welcome! I am G-Bot, how may I assist you today?",
+        "Hello, my name is G-Bot! Can I help you?",
+        "Welcome back, nice to see you again, I am G-Bot, how can I help?",
+        "G-Bot here, how can I help you this fine day?"
+    ]
+    return random.choice(welcome_list)
+
+def get_a_random_confirm_message():
+    confirm_list = [
+        "That's a great question, let me look into this.",
+        "Hmmm, interesting, let me look into this further.",
+        "Question confirmed, let me get back to you in a moment...",
+        "Great question, let's look into this further...",
+        "Interesting question, I will get back to you in just a moment..."
+    ]
+    return random.choice(confirm_list)
+
+def listen_for_wake_word(wake_words=["hey g-bot", "g-bot what is my name", "g-bot translate"]):
+    recognizer = sr.Recognizer()
+    microphone = sr.Microphone()
+    main_voice = "alloy"
+
+    while True:  
+        with microphone as source:
+            recognizer.adjust_for_ambient_noise(source, duration=1)
+            print("Listening for wake word...")
+            try:
+                audio = recognizer.listen(source, timeout=None, phrase_time_limit=4) 
+                transcript = recognizer.recognize_google(audio).lower()
+
+                wake_word_detected = False
+
+                for wake_word in wake_words:
+                    if fuzz.partial_ratio(wake_word, transcript) > 60:  
+                        wake_word_detected = True
+                        print(f"Wake word detected: {wake_word}")
+                        if "g-bot what is my name" in wake_word:
+                            image_capture_path = 'image_capture.jpg'
+                            capture_image_no_preview(image_capture_path)
+                            
+                            known_faces_dir = 'known_faces'
+                            recognize_faces_in_image(image_capture_path, known_faces_dir)
+                            print("Responding to personal identity query.")
+                        elif "g-bot translate" in wake_word:
+                            print("Translation mode activated.")
+                        elif "hey g-bot" in wake_word:
+                            print(f"Transcript: {transcript}")
+                            welcome_message = get_a_random_welcome_message()
+                            voiceFoundResponse = client.audio.speech.create(
+                                model="tts-1",
+                                voice=main_voice,
+                                input=welcome_message
+                            )
+                            voiceFoundResponse.stream_to_file("Welcome_Phrase.mp3")
+                            play_audio("Welcome_Phrase.mp3")
+
+                            record_duration = 6  
+                            output_filename = 'my_voice_recording.wav'
+                            record_audio(record_duration, output_filename)
+
+                            with open(output_filename, "rb") as audio_file:
+                                transcript_response = client.audio.transcriptions.create(
+                                    model="whisper-1", 
+                                    file=audio_file, 
+                                    response_format="text"
+                                )
+                                user_question = transcript_response
+                                confirm_message = get_a_random_confirm_message()
+                                messageConfirmResponse = client.audio.speech.create(
+                                    model="tts-1",
+                                    voice=main_voice,
+                                    input=confirm_message
+                                )
+                                messageConfirmResponse.stream_to_file("Confirm_Message.mp3")
+                                play_audio("Confirm_Message.mp3")
+
+                            response = client.chat.completions.create(
+                                model="gpt-3.5-turbo",
+                                messages=[
+                                    {"role": "system", "content": "You are a helpful assistant designed to output plain text."},
+                                    {"role": "user", "content": user_question}
+                                ]
+                            )
+
+                            speech_file_path = "ttsTest.mp3"
+                            response2 = client.audio.speech.create(
+                                model="tts-1",
+                                voice=main_voice,
+                                input=response.choices[0].message.content
+                            )
+                            if response.choices:
+                                print(response.choices[0].message.content)
+                                response2.stream_to_file(speech_file_path)
+                                play_audio(speech_file_path)
+                            else:
+                                print("No response received.")
+
+            except sr.UnknownValueError:
+                print("Could not understand audio, please try again...")
+            except sr.RequestError as e:
+                print(f"Could not request results; {e}")
+
+if __name__ == "__main__":
+    listen_for_wake_word()
+
